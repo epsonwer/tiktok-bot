@@ -23,44 +23,43 @@ TIKTOK_PATTERN = re.compile(
     re.IGNORECASE
 )
 
-# Ищем cookies.txt в нескольких местах
+
 def find_cookies() -> str | None:
     candidates = [
         os.environ.get("COOKIES_PATH", ""),
         "/app/cookies.txt",
         "./cookies.txt",
-        os.path.join(os.path.dirname(__file__), "cookies.txt"),
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "cookies.txt"),
     ]
     for path in candidates:
         if path and os.path.exists(path):
-            print(f"[cookies] найден: {path}")
+            print(f"[cookies] найден: {path}", flush=True)
             return path
-    print("[cookies] файл не найден")
+    print("[cookies] файл не найден", flush=True)
     return None
 
 
 def reencode_video(input_path: str) -> str:
-    """Перекодирует видео для совместимости с мобильными."""
-    output_path = input_path.replace(".mp4", "_fixed.mp4")
-    if not output_path.endswith("_fixed.mp4"):
-        output_path = input_path + "_fixed.mp4"
+    """Полное перекодирование в H264/AAC — максимальная совместимость с мобильными."""
+    output_path = input_path + "_out.mp4"
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
         "-c:v", "libx264",
         "-c:a", "aac",
-        "-movflags", "+faststart",
-        "-pix_fmt", "yuv420p",
+        "-ac", "2",                                      # Стерео аудио
+        "-movflags", "+faststart",                       # Метаданные в начале — стриминг на мобиле
+        "-pix_fmt", "yuv420p",                           # Обязательно для iOS/Android
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",     # Чётные размеры — обязательно для H264
         "-preset", "ultrafast",
-        "-crf", "28",
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # Чётные размеры — обязательно для H264
+        "-crf", "26",
         output_path
     ]
-    result = subprocess.run(cmd, capture_output=True, timeout=180)
+    result = subprocess.run(cmd, capture_output=True, timeout=240)
     if result.returncode == 0 and os.path.exists(output_path):
         os.unlink(input_path)
         return output_path
-    # ffmpeg упал — вернём оригинал
+    print(f"[ffmpeg error] {result.stderr.decode()[:300]}", flush=True)
     return input_path
 
 
@@ -93,15 +92,15 @@ def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
     out_template = os.path.join(tmp_dir, "video.%(ext)s")
 
     ydl_opts = {
+        # Максимально широкий fallback
         "format": (
-            "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
-            "bestvideo[ext=mp4]+bestaudio/"
-            "best[ext=mp4]/"
+            "bestvideo[height<=1080]+bestaudio/"
+            "bestvideo+bestaudio/"
             "best"
         ),
         "outtmpl": out_template,
-        "quiet": True,
-        "no_warnings": True,
+        "quiet": False,
+        "no_warnings": False,
         "merge_output_format": "mp4",
         "noplaylist": True,
         "max_filesize": 50 * 1024 * 1024,
@@ -115,23 +114,17 @@ def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
         ydl.extract_info(url, download=True)
 
     # Ищем скачанный файл
-    for f in os.listdir(tmp_dir):
-        if f.startswith("video") and not f.endswith(".part"):
+    filepath = None
+    for f in sorted(os.listdir(tmp_dir)):
+        if not f.endswith(".part") and not f.endswith(".ytdl"):
             filepath = os.path.join(tmp_dir, f)
-            # Если не mp4 — конвертируем
-            if not f.endswith(".mp4"):
-                new_path = filepath.rsplit(".", 1)[0] + ".mp4"
-                subprocess.run(
-                    ["ffmpeg", "-y", "-i", filepath, "-c", "copy", new_path],
-                    capture_output=True, timeout=60
-                )
-                if os.path.exists(new_path):
-                    os.unlink(filepath)
-                    filepath = new_path
+            break
 
-            return reencode_video(filepath)
+    if not filepath or not os.path.exists(filepath):
+        return None
 
-    return None
+    # Перекодируем для мобильной совместимости
+    return reencode_video(filepath)
 
 
 pending: dict[int, list[str]] = {}
@@ -197,7 +190,7 @@ async def process_urls(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
             elif "Timed out" in err or "timed out" in err:
                 await update.message.reply_text(f"❌ Видео {i}: тайм-аут, попробуй ещё раз")
             else:
-                await update.message.reply_text(f"❌ Ошибка видео {i}: {err[:200]}")
+                await update.message.reply_text(f"❌ Ошибка видео {i}: {err[:300]}")
 
         finally:
             if video_path and os.path.exists(video_path):
@@ -243,16 +236,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
     cookies = find_cookies()
     if cookies:
-        print(f"[старт] cookies.txt подключён: {cookies}")
+        print(f"[старт] cookies.txt подключён: {cookies}", flush=True)
     else:
-        print("[старт] cookies.txt не найден — YouTube может не работать")
+        print("[старт] cookies.txt не найден — YouTube может не работать", flush=True)
 
-    print("Бот запущен...")
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("Бот запущен...", flush=True)
     app.run_polling()
 
 
