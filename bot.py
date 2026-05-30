@@ -23,10 +23,27 @@ TIKTOK_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+# Ищем cookies.txt в нескольких местах
+def find_cookies() -> str | None:
+    candidates = [
+        os.environ.get("COOKIES_PATH", ""),
+        "/app/cookies.txt",
+        "./cookies.txt",
+        os.path.join(os.path.dirname(__file__), "cookies.txt"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            print(f"[cookies] найден: {path}")
+            return path
+    print("[cookies] файл не найден")
+    return None
+
 
 def reencode_video(input_path: str) -> str:
-    """Перекодирует видео для совместимости с мобильными через ffmpeg."""
+    """Перекодирует видео для совместимости с мобильными."""
     output_path = input_path.replace(".mp4", "_fixed.mp4")
+    if not output_path.endswith("_fixed.mp4"):
+        output_path = input_path + "_fixed.mp4"
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
@@ -34,19 +51,20 @@ def reencode_video(input_path: str) -> str:
         "-c:a", "aac",
         "-movflags", "+faststart",
         "-pix_fmt", "yuv420p",
-        "-preset", "ultrafast",   # Максимально быстрое кодирование
-        "-crf", "28",             # Чуть менее качественно но быстро
+        "-preset", "ultrafast",
+        "-crf", "28",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",  # Чётные размеры — обязательно для H264
         output_path
     ]
     result = subprocess.run(cmd, capture_output=True, timeout=180)
     if result.returncode == 0 and os.path.exists(output_path):
         os.unlink(input_path)
         return output_path
+    # ffmpeg упал — вернём оригинал
     return input_path
 
 
 async def download_tiktok(url: str) -> bytes | None:
-    """Скачивает TikTok видео без водяного знака в максимальном качестве."""
     api_url = f"https://tikwm.com/api/?url={url}&hd=1"
     async with httpx.AsyncClient(timeout=30) as client:
         resp = await client.get(api_url, headers={"User-Agent": "Mozilla/5.0"})
@@ -72,11 +90,9 @@ async def download_tiktok(url: str) -> bytes | None:
 
 
 def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
-    """Скачивает видео через yt-dlp."""
-    out_template = os.path.join(tmp_dir, "%(id)s.%(ext)s")
+    out_template = os.path.join(tmp_dir, "video.%(ext)s")
 
     ydl_opts = {
-        # Широкий fallback: сначала лучшее mp4, потом любое лучшее
         "format": (
             "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]/"
             "bestvideo[ext=mp4]+bestaudio/"
@@ -91,25 +107,31 @@ def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
         "max_filesize": 50 * 1024 * 1024,
     }
 
-    cookies_path = os.environ.get("COOKIES_PATH", "/app/cookies.txt")
-    if os.path.exists(cookies_path):
-        ydl_opts["cookiefile"] = cookies_path
+    cookies = find_cookies()
+    if cookies:
+        ydl_opts["cookiefile"] = cookies
 
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        filename = ydl.prepare_filename(info)
-        if not os.path.exists(filename):
-            filename = filename.rsplit(".", 1)[0] + ".mp4"
-        if not os.path.exists(filename):
-            for f in os.listdir(tmp_dir):
-                if f.endswith((".mp4", ".mkv", ".webm")):
-                    filename = os.path.join(tmp_dir, f)
-                    break
+        ydl.extract_info(url, download=True)
 
-    if not os.path.exists(filename):
-        return None
+    # Ищем скачанный файл
+    for f in os.listdir(tmp_dir):
+        if f.startswith("video") and not f.endswith(".part"):
+            filepath = os.path.join(tmp_dir, f)
+            # Если не mp4 — конвертируем
+            if not f.endswith(".mp4"):
+                new_path = filepath.rsplit(".", 1)[0] + ".mp4"
+                subprocess.run(
+                    ["ffmpeg", "-y", "-i", filepath, "-c", "copy", new_path],
+                    capture_output=True, timeout=60
+                )
+                if os.path.exists(new_path):
+                    os.unlink(filepath)
+                    filepath = new_path
 
-    return reencode_video(filename)
+            return reencode_video(filepath)
+
+    return None
 
 
 pending: dict[int, list[str]] = {}
@@ -170,10 +192,10 @@ async def process_urls(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
                 await update.message.reply_text(f"❌ Видео {i} слишком большое (лимит — 50 МБ)")
             elif "Private" in err or "login" in err.lower():
                 await update.message.reply_text(f"❌ Видео {i} приватное или требует авторизации")
-            elif "Sign in" in err or "confirm" in err.lower():
-                await update.message.reply_text(f"❌ Видео {i}: YouTube требует куки — добавь cookies.txt")
+            elif "Sign in" in err or "confirm" in err.lower() or "bot" in err.lower():
+                await update.message.reply_text(f"❌ Видео {i}: YouTube требует куки — обнови cookies.txt")
             elif "Timed out" in err or "timed out" in err:
-                await update.message.reply_text(f"❌ Видео {i}: превышено время ожидания, попробуй ещё раз")
+                await update.message.reply_text(f"❌ Видео {i}: тайм-аут, попробуй ещё раз")
             else:
                 await update.message.reply_text(f"❌ Ошибка видео {i}: {err[:200]}")
 
@@ -223,6 +245,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+
+    cookies = find_cookies()
+    if cookies:
+        print(f"[старт] cookies.txt подключён: {cookies}")
+    else:
+        print("[старт] cookies.txt не найден — YouTube может не работать")
+
     print("Бот запущен...")
     app.run_polling()
 
