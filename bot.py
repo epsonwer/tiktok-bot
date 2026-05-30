@@ -7,7 +7,7 @@ from telegram import Update
 from telegram.ext import ApplicationBuilder, MessageHandler, filters, ContextTypes
 import yt_dlp
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN", "ВСТАВЬ_СВОЙ_TOKEN_СЮДА")
+BOT_TOKEN = os.environ.get("BOT_TOKEN", "8888017850:AAGVphq-pYKa4w_OR1TNaUGJX5H5ARpEefg")
 
 # Паттерны для всех поддерживаемых платформ
 URL_PATTERN = re.compile(
