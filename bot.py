@@ -23,6 +23,11 @@ TIKTOK_PATTERN = re.compile(
     re.IGNORECASE
 )
 
+INSTAGRAM_PATTERN = re.compile(
+    r"https?://(?:www\.)?instagram\.com/\S+",
+    re.IGNORECASE
+)
+
 
 def find_cookies() -> str | None:
     candidates = [
@@ -40,13 +45,13 @@ def find_cookies() -> str | None:
 
 
 def reencode_video(input_path: str) -> str:
-    """Полное перекодирование в H264 Baseline — максимальная совместимость с iOS/Android."""
+    """Перекодирует видео в H264 для совместимости с мобильными."""
     output_path = input_path + "_out.mp4"
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
         "-c:v", "libx264",
-        "-profile:v", "baseline",   # Baseline profile — максимальная совместимость с телефонами
+        "-profile:v", "baseline",
         "-level", "3.1",
         "-c:a", "aac",
         "-ac", "2",
@@ -72,15 +77,12 @@ async def download_tiktok(url: str) -> bytes | None:
         resp = await client.get(api_url, headers={"User-Agent": "Mozilla/5.0"})
         resp.raise_for_status()
         data = resp.json()
-
     if data.get("code") != 0:
         return None
-
     d = data["data"]
     video_url = d.get("hdplay") or d.get("play") or d.get("wmplay")
     if not video_url:
         return None
-
     async with httpx.AsyncClient(timeout=120, follow_redirects=True) as client:
         video_resp = await client.get(video_url, headers={
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
@@ -94,16 +96,12 @@ async def download_tiktok(url: str) -> bytes | None:
 def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
     out_template = os.path.join(tmp_dir, "video.%(ext)s")
 
+    # Для YouTube — берём любой доступный формат без ограничений
     ydl_opts = {
-        "format": (
-            "bestvideo[height<=1080]+bestaudio/"
-            "bestvideo+bestaudio/"
-            "best"
-        ),
+        "format": "best",
         "outtmpl": out_template,
         "quiet": False,
         "no_warnings": False,
-        "merge_output_format": "mp4",
         "noplaylist": True,
         "max_filesize": 50 * 1024 * 1024,
     }
@@ -115,7 +113,39 @@ def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
     with yt_dlp.YoutubeDL(ydl_opts) as ydl:
         ydl.extract_info(url, download=True)
 
-    # Ищем скачанный файл
+    filepath = None
+    for f in sorted(os.listdir(tmp_dir)):
+        if not f.endswith(".part") and not f.endswith(".ytdl"):
+            filepath = os.path.join(tmp_dir, f)
+            break
+
+    if not filepath or not os.path.exists(filepath):
+        return None
+
+    return reencode_video(filepath)
+
+
+def download_instagram(url: str, tmp_dir: str) -> str | None:
+    """Скачивает Instagram через yt-dlp с отдельными настройками."""
+    out_template = os.path.join(tmp_dir, "video.%(ext)s")
+
+    ydl_opts = {
+        "format": "best",
+        "outtmpl": out_template,
+        "quiet": False,
+        "no_warnings": False,
+        "noplaylist": True,
+        "max_filesize": 50 * 1024 * 1024,
+        # Заголовки как у браузера — Instagram требователен
+        "http_headers": {
+            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15",
+            "Accept-Language": "en-US,en;q=0.9",
+        },
+    }
+
+    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+        ydl.extract_info(url, download=True)
+
     filepath = None
     for f in sorted(os.listdir(tmp_dir)):
         if not f.endswith(".part") and not f.endswith(".ytdl"):
@@ -154,6 +184,13 @@ async def process_urls(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
                         video_path = f.name
                     loop = asyncio.get_event_loop()
                     video_path = await loop.run_in_executor(None, reencode_video, video_path)
+
+            elif INSTAGRAM_PATTERN.match(url):
+                tmp_dir = tempfile.mkdtemp()
+                loop = asyncio.get_event_loop()
+                video_path = await loop.run_in_executor(
+                    None, download_instagram, url, tmp_dir
+                )
             else:
                 tmp_dir = tempfile.mkdtemp()
                 loop = asyncio.get_event_loop()
@@ -170,10 +207,11 @@ async def process_urls(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
                 await update.message.reply_text(f"❌ Видео {i} слишком большое ({size_mb:.0f} МБ, лимит — 50 МБ)")
                 continue
 
+            # Отправляем как документ — гарантированное воспроизведение на всех телефонах
             with open(video_path, "rb") as f:
-                await update.message.reply_video(
-                    video=f,
-                    supports_streaming=True,
+                await update.message.reply_document(
+                    document=f,
+                    filename=f"video_{i}.mp4",
                     write_timeout=120,
                     read_timeout=120,
                 )
@@ -187,7 +225,7 @@ async def process_urls(update: Update, context: ContextTypes.DEFAULT_TYPE, user_
             elif "Private" in err or "login" in err.lower():
                 await update.message.reply_text(f"❌ Видео {i} приватное или требует авторизации")
             elif "Sign in" in err or "confirm" in err.lower() or "bot" in err.lower():
-                await update.message.reply_text(f"❌ Видео {i}: YouTube требует куки — обнови cookies.txt")
+                await update.message.reply_text(f"❌ Видео {i}: требует авторизацию")
             elif "Timed out" in err or "timed out" in err:
                 await update.message.reply_text(f"❌ Видео {i}: тайм-аут, попробуй ещё раз")
             else:
@@ -241,7 +279,7 @@ def main():
     if cookies:
         print(f"[старт] cookies.txt подключён: {cookies}", flush=True)
     else:
-        print("[старт] cookies.txt не найден — YouTube может не работать", flush=True)
+        print("[старт] cookies.txt не найден", flush=True)
 
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
