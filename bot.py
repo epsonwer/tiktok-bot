@@ -40,17 +40,20 @@ def find_cookies() -> str | None:
 
 
 def reencode_video(input_path: str) -> str:
-    """Полное перекодирование в H264/AAC — максимальная совместимость с мобильными."""
+    """Полное перекодирование в H264 Baseline — максимальная совместимость с iOS/Android."""
     output_path = input_path + "_out.mp4"
     cmd = [
         "ffmpeg", "-y",
         "-i", input_path,
         "-c:v", "libx264",
+        "-profile:v", "baseline",   # Baseline profile — максимальная совместимость с телефонами
+        "-level", "3.1",
         "-c:a", "aac",
-        "-ac", "2",                                      # Стерео аудио
-        "-movflags", "+faststart",                       # Метаданные в начале — стриминг на мобиле
-        "-pix_fmt", "yuv420p",                           # Обязательно для iOS/Android
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",     # Чётные размеры — обязательно для H264
+        "-ac", "2",
+        "-ar", "44100",
+        "-movflags", "+faststart",
+        "-pix_fmt", "yuv420p",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
         "-preset", "ultrafast",
         "-crf", "26",
         output_path
@@ -59,7 +62,7 @@ def reencode_video(input_path: str) -> str:
     if result.returncode == 0 and os.path.exists(output_path):
         os.unlink(input_path)
         return output_path
-    print(f"[ffmpeg error] {result.stderr.decode()[:300]}", flush=True)
+    print(f"[ffmpeg error] {result.stderr.decode()[:500]}", flush=True)
     return input_path
 
 
@@ -92,7 +95,6 @@ def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
     out_template = os.path.join(tmp_dir, "video.%(ext)s")
 
     ydl_opts = {
-        # Максимально широкий fallback
         "format": (
             "bestvideo[height<=1080]+bestaudio/"
             "bestvideo+bestaudio/"
@@ -123,7 +125,6 @@ def download_with_ytdlp(url: str, tmp_dir: str) -> str | None:
     if not filepath or not os.path.exists(filepath):
         return None
 
-    # Перекодируем для мобильной совместимости
     return reencode_video(filepath)
 
 
